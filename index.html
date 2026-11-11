@@ -86,6 +86,7 @@ var fillEl=document.getElementById("meterFill");
 
 function say(t){statusEl.textContent=t}
 function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function smooth(a,b,x){var t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t)}
 
 if(!window.THREE){say("The 3D library did not load. Check your connection and reload the page.");return}
 var THREE=window.THREE;
@@ -95,35 +96,21 @@ try{renderer=new THREE.WebGLRenderer({antialias:true,alpha:true})}
 catch(e){say("This browser cannot run WebGL, so the candle cannot be drawn.");return}
 renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
 renderer.setClearColor(0x000000,0);
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure=1.15;
 stage.appendChild(renderer.domElement);
 
 var scene=new THREE.Scene();
 scene.fog=new THREE.Fog(0x08070a,12,30);
 var camera=new THREE.PerspectiveCamera(38,1,0.1,80);
 
+/* ---------- small noise helpers (JS side) ---------- */
+function hash1(n){var x=Math.sin(n*127.1)*43758.5453;return x-Math.floor(x)}
+function vnoise(x){var i=Math.floor(x),f=x-i;f=f*f*(3-2*f);return hash1(i)*(1-f)+hash1(i+1)*f}
+function flickerNoise(t){return vnoise(t*9)*0.5+vnoise(t*21+7)*0.3+vnoise(t*47+3)*0.2}
+
 /* ---------- textures drawn on canvas ---------- */
 function canvasTex(c){var t=new THREE.CanvasTexture(c);t.needsUpdate=true;return t}
-
-function flameTex(stops){
-  var c=document.createElement("canvas");c.width=128;c.height=256;
-  var g=c.getContext("2d");
-  g.shadowColor="#ffffff";g.shadowBlur=26;
-  g.fillStyle="#ffffff";
-  g.beginPath();
-  g.moveTo(64,236);
-  g.bezierCurveTo(28,236,24,172,46,132);
-  g.bezierCurveTo(60,106,62,60,64,20);
-  g.bezierCurveTo(66,60,68,106,82,132);
-  g.bezierCurveTo(104,172,100,236,64,236);
-  g.closePath();
-  g.fill();
-  g.shadowBlur=0;
-  g.globalCompositeOperation="source-in";
-  var gr=g.createRadialGradient(64,204,4,64,196,200);
-  for(var i=0;i<stops.length;i++)gr.addColorStop(stops[i][0],stops[i][1]);
-  g.fillStyle=gr;g.fillRect(0,0,128,256);
-  return canvasTex(c);
-}
 function roundTex(stops){
   var c=document.createElement("canvas");c.width=c.height=128;
   var g=c.getContext("2d");
@@ -136,21 +123,51 @@ function waxGlowTex(){
   var c=document.createElement("canvas");c.width=4;c.height=256;
   var g=c.getContext("2d");
   var gr=g.createLinearGradient(0,0,0,256);
-  gr.addColorStop(0,"#ffffff");gr.addColorStop(0.12,"#d9b27a");gr.addColorStop(0.4,"#4a2f14");gr.addColorStop(0.7,"#000000");
+  gr.addColorStop(0,"#ffffff");gr.addColorStop(0.1,"#e2b87c");gr.addColorStop(0.35,"#5a3818");gr.addColorStop(0.65,"#0c0602");gr.addColorStop(1,"#000000");
   g.fillStyle=gr;g.fillRect(0,0,4,256);
   return canvasTex(c);
 }
+function waxBumpTex(){
+  var W=128,Hh=256;
+  var c=document.createElement("canvas");c.width=W;c.height=Hh;
+  var g=c.getContext("2d");
+  var im=g.createImageData(W,Hh);
+  for(var y=0;y<Hh;y++)for(var x=0;x<W;x++){
+    var v=128+10*Math.sin(x*0.9+3*Math.sin(y*0.03))+(Math.random()-0.5)*8;
+    var k=(y*W+x)*4;
+    im.data[k]=im.data[k+1]=im.data[k+2]=v;im.data[k+3]=255;
+  }
+  g.putImageData(im,0,0);
+  var t=canvasTex(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;
+  return t;
+}
 
-var texOuter=flameTex([[0,"rgba(255,150,40,0.6)"],[0.55,"rgba(255,100,10,0.4)"],[1,"rgba(255,60,0,0)"]]);
-var texMid=flameTex([[0,"rgba(255,236,160,1)"],[0.5,"rgba(255,190,60,0.9)"],[1,"rgba(255,130,20,0)"]]);
-var texCore=flameTex([[0,"rgba(255,255,240,1)"],[0.6,"rgba(255,240,170,0.8)"],[1,"rgba(255,220,120,0)"]]);
-var texGlow=roundTex([[0,"rgba(255,170,70,0.9)"],[0.35,"rgba(255,120,30,0.35)"],[1,"rgba(255,90,0,0)"]]);
-var texBlue=roundTex([[0,"rgba(140,180,255,0.9)"],[1,"rgba(70,110,255,0)"]]);
-var texSmoke=roundTex([[0,"rgba(255,255,255,0.55)"],[0.5,"rgba(255,255,255,0.22)"],[1,"rgba(255,255,255,0)"]]);
-var texEmber=roundTex([[0,"rgba(255,200,110,1)"],[0.4,"rgba(255,110,20,0.6)"],[1,"rgba(255,60,0,0)"]]);
+var texGlow=roundTex([[0,"rgba(255,175,80,0.9)"],[0.3,"rgba(255,125,35,0.38)"],[1,"rgba(255,90,0,0)"]]);
+var texHalo=roundTex([[0,"rgba(255,190,100,0.8)"],[0.3,"rgba(255,140,50,0.3)"],[1,"rgba(255,110,20,0)"]]);
+var texSmoke=roundTex([[0,"rgba(255,255,255,0.6)"],[0.45,"rgba(255,255,255,0.2)"],[1,"rgba(255,255,255,0)"]]);
+var texEmber=roundTex([[0,"rgba(255,210,120,1)"],[0.4,"rgba(255,110,20,0.6)"],[1,"rgba(255,60,0,0)"]]);
+var texMote=roundTex([[0,"rgba(255,255,255,1)"],[0.4,"rgba(255,255,255,0.35)"],[1,"rgba(255,255,255,0)"]]);
+var texShadow=roundTex([[0,"rgba(0,0,0,0.85)"],[0.55,"rgba(0,0,0,0.45)"],[1,"rgba(0,0,0,0)"]]);
+
+/* ---------- reflections for the brass dish ---------- */
+var envTex=null;
+try{
+  var ec=document.createElement("canvas");ec.width=256;ec.height=128;
+  var eg=ec.getContext("2d");
+  var eb=eg.createLinearGradient(0,0,0,128);
+  eb.addColorStop(0,"#241810");eb.addColorStop(0.5,"#2e1f12");eb.addColorStop(1,"#0a0806");
+  eg.fillStyle=eb;eg.fillRect(0,0,256,128);
+  var ebl=eg.createRadialGradient(128,44,0,128,44,62);
+  ebl.addColorStop(0,"rgba(255,205,125,1)");ebl.addColorStop(1,"rgba(255,140,40,0)");
+  eg.fillStyle=ebl;eg.fillRect(0,0,256,128);
+  var et=new THREE.CanvasTexture(ec);et.mapping=THREE.EquirectangularReflectionMapping;
+  var pm=new THREE.PMREMGenerator(renderer);
+  envTex=pm.fromEquirectangular(et).texture;
+  pm.dispose();
+}catch(e){envTex=null}
 
 /* ---------- the room ---------- */
-scene.add(new THREE.AmbientLight(0x2a2f45,0.4));
+scene.add(new THREE.AmbientLight(0x3d3126,0.7));
 
 var floor=new THREE.Mesh(
   new THREE.PlaneGeometry(90,90),
@@ -159,118 +176,238 @@ var floor=new THREE.Mesh(
 floor.rotation.x=-Math.PI/2;
 scene.add(floor);
 
+var contact=new THREE.Mesh(
+  new THREE.PlaneGeometry(4.6,4.6),
+  new THREE.MeshBasicMaterial({map:texShadow,transparent:true,depthWrite:false,opacity:0.8})
+);
+contact.rotation.x=-Math.PI/2;contact.position.y=0.003;
+scene.add(contact);
+
+/* brass dish: a lathe profile with a raised lip and a shallow well */
+var plateMat=new THREE.MeshStandardMaterial({
+  color:envTex?0xc9a25f:0xb08a4a,roughness:0.34,metalness:envTex?0.85:0.35,
+  envMap:envTex,envMapIntensity:1,side:THREE.DoubleSide
+});
+var platePts=[[0,0],[1.2,0],[1.46,0.03],[1.56,0.1],[1.52,0.125],[1.4,0.085],[1.05,0.065],[0,0.065]]
+  .map(function(p){return new THREE.Vector2(p[0],p[1])});
+var plate=new THREE.Mesh(new THREE.LatheGeometry(platePts,96),plateMat);
+scene.add(plate);
+
+/* ---------- candle geometry ---------- */
+var H=2.2,R=0.45;
+var SPILL=Math.PI/2-0.35;                 /* the side where wax has run over the rim, facing the viewer */
+var poolY=H-0.14;
+
+function rimY(th){
+  var d=Math.cos(th-SPILL);
+  var dip=Math.pow(Math.max(0,d),3)*0.11;
+  var wob=0.012*Math.sin(3*th+1)+0.008*Math.sin(5*th+2);
+  return H-dip+wob;
+}
+
 var candle=new THREE.Group();
-candle.position.y=0.1;
+candle.position.y=0.065;
 scene.add(candle);
 
-var plate=new THREE.Mesh(
-  new THREE.CylinderGeometry(1.45,1.35,0.1,64),
-  new THREE.MeshStandardMaterial({color:0xb08a4a,roughness:0.4,metalness:0.35})
-);
-plate.position.y=0.05;
-scene.add(plate);
-var dish=new THREE.Mesh(
-  new THREE.CylinderGeometry(1.08,1.08,0.03,64),
-  new THREE.MeshStandardMaterial({color:0x6e5429,roughness:0.5,metalness:0.3})
-);
-dish.position.y=0.11;
-scene.add(dish);
-
-var H=2.2,R=0.45;
 var waxMat=new THREE.MeshStandardMaterial({
-  color:0xf3e6c9,roughness:0.6,metalness:0,
+  color:0xf3e6c9,roughness:0.55,metalness:0,
+  bumpMap:waxBumpTex(),bumpScale:0.1,
   emissive:0xffa050,emissiveMap:waxGlowTex(),emissiveIntensity:1
 });
-var body=new THREE.Mesh(new THREE.CylinderGeometry(R,R,H,48,1,true),waxMat);
-body.position.y=H/2;
+
+var bodyGeo=new THREE.CylinderGeometry(R,R,1,96,48,true);
+bodyGeo.rotateY(Math.PI);                 /* put the seam at the back */
+(function(){
+  var pos=bodyGeo.attributes.position;
+  for(var i=0;i<pos.count;i++){
+    var x=pos.getX(i),y=pos.getY(i),z=pos.getZ(i);
+    var th=Math.atan2(z,x),t=y+0.5;
+    var rad=R*(1.02-0.035*t+0.012*Math.sin(4*th+t*6)+0.008*Math.sin(7*th-t*9));
+    pos.setXYZ(i,Math.cos(th)*rad,t*rimY(th),Math.sin(th)*rad);
+  }
+  bodyGeo.computeVertexNormals();
+})();
+var body=new THREE.Mesh(bodyGeo,waxMat);
 candle.add(body);
 
-var topMat=new THREE.MeshStandardMaterial({color:0xfff1cf,roughness:0.5,emissive:0xffb060,emissiveIntensity:0.9});
-var top=new THREE.Mesh(new THREE.CircleGeometry(R*0.97,48),topMat);
-top.rotation.x=-Math.PI/2;top.position.y=H;
-candle.add(top);
+/* melted crater: a bowl of liquid wax inside a thick rim */
+var topMat=new THREE.MeshStandardMaterial({
+  vertexColors:true,roughness:0.28,metalness:0,
+  emissive:0xffb458,emissiveIntensity:0.3,side:THREE.DoubleSide
+});
+(function(){
+  var rings=18,segs=96,verts=[],cols=[],idx=[];
+  var rimC=[0.82,0.78,0.7],poolC=[0.88,0.78,0.52];
+  for(var j=0;j<=rings;j++){
+    var u=j/rings,r=R*0.985*u*(1.02-0.035);
+    for(var i=0;i<segs;i++){
+      var th=i/segs*Math.PI*2;
+      var rim=rimY(th);
+      var bowl=poolY-0.025*Math.cos(th-SPILL);
+      var y=bowl+(rim-bowl)*Math.pow(u,3.0)+0.02*Math.exp(-Math.pow((u-0.93)/0.05,2));
+      verts.push(Math.cos(th)*r,y,Math.sin(th)*r);
+      var m=smooth(0.55,0.88,u);
+      cols.push(poolC[0]+(rimC[0]-poolC[0])*m,poolC[1]+(rimC[1]-poolC[1])*m,poolC[2]+(rimC[2]-poolC[2])*m);
+    }
+  }
+  for(var j2=0;j2<rings;j2++)for(var i2=0;i2<segs;i2++){
+    var i3=(i2+1)%segs;
+    var a=j2*segs+i2,b=j2*segs+i3,c=(j2+1)*segs+i2,d=(j2+1)*segs+i3;
+    idx.push(a,b,c,b,d,c);
+  }
+  var g=new THREE.BufferGeometry();
+  g.setAttribute("position",new THREE.Float32BufferAttribute(verts,3));
+  g.setAttribute("color",new THREE.Float32BufferAttribute(cols,3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  candle.add(new THREE.Mesh(g,topMat));
+})();
 
-var rimMat=new THREE.MeshStandardMaterial({color:0xf3e6c9,roughness:0.55,emissive:0xffa050,emissiveIntensity:0.3});
-var rim=new THREE.Mesh(new THREE.TorusGeometry(R*0.98,0.035,8,48),rimMat);
-rim.rotation.x=Math.PI/2;rim.position.y=H;
-candle.add(rim);
+/* wax puddle where the candle meets the dish */
+var puddle=new THREE.Mesh(new THREE.CircleGeometry(0.66,64),new THREE.MeshStandardMaterial({color:0xa8956f,roughness:0.4,metalness:0,emissive:0xffa050,emissiveIntensity:0.08}));
+puddle.rotation.x=-Math.PI/2;puddle.position.y=0.006;puddle.scale.set(1.04,0.94,1);
+candle.add(puddle);
 
-var dripMat=new THREE.MeshStandardMaterial({color:0xf6ead0,roughness:0.5,emissive:0xffa050,emissiveIntensity:0.25});
-[[1.35,0.7],[1.75,0.45],[2.15,0.95]].forEach(function(d){
-  var len=d[1],r=0.045;
-  var g=new THREE.Group();
-  var cyl=new THREE.Mesh(new THREE.CylinderGeometry(r,r*1.1,len,12),dripMat);
-  cyl.position.y=-len/2;
-  var tip=new THREE.Mesh(new THREE.SphereGeometry(r*1.3,12,10),dripMat);
-  tip.position.y=-len;
-  g.add(cyl);g.add(tip);
-  g.position.set(Math.cos(d[0])*(R+0.012),H,Math.sin(d[0])*(R+0.012));
+/* drips running down the wall from the spilled side */
+var dripMat=new THREE.MeshStandardMaterial({color:0xf6ead0,roughness:0.4,metalness:0,emissive:0xffa050,emissiveIntensity:0.5});
+function dripGeo(len){
+  var p=[[0,-len-0.055],[0.03,-len-0.045],[0.06,-len],[0.062,-len*0.93],[0.04,-len*0.8],[0.045,-len*0.4],[0.05,0],[0,0.02]];
+  return new THREE.LatheGeometry(p.map(function(q){return new THREE.Vector2(q[0],q[1])}),14);
+}
+[[0,1.0,1.5],[0.42,0.55,1],[-0.4,0.36,1],[0.95,0.25,1],[-1.1,0.6,1]].forEach(function(d){
+  var th=SPILL+d[0];
+  var g=new THREE.Mesh(dripGeo(d[1]),dripMat);
+  g.position.set(Math.cos(th)*R*0.99,rimY(th)-0.01,Math.sin(th)*R*0.99);
+  g.rotation.y=-th;
+  g.scale.set(0.5,1,d[2]);
   candle.add(g);
 });
 
+/* curved, charred wick */
 var wickMat=new THREE.MeshStandardMaterial({color:0x17120d,roughness:0.9,emissive:0xff5a10,emissiveIntensity:0});
-var wick=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.03,0.26,10),wickMat);
-wick.position.y=H+0.13;
-candle.add(wick);
+var wickCurve=new THREE.CatmullRomCurve3([
+  new THREE.Vector3(0,poolY-0.03,0),new THREE.Vector3(0.004,poolY+0.1,0),
+  new THREE.Vector3(0.02,poolY+0.2,0),new THREE.Vector3(0.05,poolY+0.27,0)
+]);
+candle.add(new THREE.Mesh(new THREE.TubeGeometry(wickCurve,16,0.017,8,false),wickMat));
+var tipMat=new THREE.MeshStandardMaterial({color:0x17120d,roughness:0.9,emissive:0xff5a10,emissiveIntensity:0});
+var wickTip=new THREE.Mesh(new THREE.SphereGeometry(0.026,10,8),tipMat);
+wickTip.position.set(0.05,poolY+0.27,0);
+candle.add(wickTip);
 
-var flameY=H+0.2;               /* local to candle */
-var worldFlameY=candle.position.y+flameY;
+var tipX=0.05,tipY=poolY+0.27;            /* local to candle */
+var worldTipY=candle.position.y+tipY;
 
-/* ---------- flame layers ---------- */
-function layer(tex,w,h,order){
-  var m=new THREE.SpriteMaterial({map:tex,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false});
-  var s=new THREE.Sprite(m);
-  s.center.set(0.5,0.08);
-  s.position.set(0,flameY,0);
-  s.userData={w:w,h:h};
-  s.renderOrder=order;
-  candle.add(s);
+/* ---------- the flame: a noise-driven shader on a tall quad ---------- */
+var flameMat=new THREE.ShaderMaterial({
+  transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,
+  uniforms:{uTime:{value:0},uLean:{value:0},uBlow:{value:0},uInt:{value:1}},
+  vertexShader:[
+    "uniform float uLean;uniform float uTime;uniform float uBlow;",
+    "varying vec2 vUv;",
+    "void main(){",
+    "  vUv=uv;",
+    "  vec3 p=position;",
+    "  float h=uv.y;",
+    "  p.x+=uLean*h*h+0.05*h*h*sin(uTime*7.0+h*3.0)*(0.5+uBlow*2.5);",
+    "  gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.0);",
+    "}"
+  ].join("\n"),
+  fragmentShader:[
+    "uniform float uTime;uniform float uInt;uniform float uBlow;",
+    "varying vec2 vUv;",
+    "float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}",
+    "float noise(vec2 p){vec2 i=floor(p);vec2 f=fract(p);f=f*f*(3.0-2.0*f);",
+    "  return mix(mix(hash(i),hash(i+vec2(1.0,0.0)),f.x),mix(hash(i+vec2(0.0,1.0)),hash(i+vec2(1.0,1.0)),f.x),f.y);}",
+    "float fbm(vec2 p){float v=0.0;float a=0.5;for(int i=0;i<4;i++){v+=a*noise(p);p=p*2.03+vec2(1.7,9.2);a*=0.5;}return v;}",
+    "void main(){",
+    "  float y=vUv.y;float x=(vUv.x-0.5)*2.0;float t=uTime;",
+    "  float turb=fbm(vec2(x*1.4,y*2.2-t*1.6))-0.5;",
+    "  float xo=turb*0.55*y*(1.0+uBlow*1.5);",
+    "  float yo=fbm(vec2(x*2.0+5.0,y*1.5-t*2.2))-0.5;",
+    "  float yy=y+yo*0.06;",
+    "  float w=0.8*sin(3.14159*pow(clamp(yy,0.0,1.0),0.55));",
+    "  float dist=abs(x+xo)/max(w,0.02);",
+    "  float body=1.0-smoothstep(0.35,1.0,dist);",
+    "  body*=1.0-smoothstep(0.8,1.0,yy);",
+    "  body*=smoothstep(0.0,0.04,yy);",
+    "  float heat=clamp((1.0-dist)*(1.0-yy*0.75)*1.25,0.0,1.0);",
+    "  vec3 red=vec3(0.75,0.12,0.0);vec3 orange=vec3(1.0,0.42,0.06);",
+    "  vec3 yellow=vec3(1.0,0.78,0.28);vec3 white=vec3(1.0,0.96,0.82);vec3 blue=vec3(0.22,0.42,1.0);",
+    "  vec3 col=mix(red,orange,smoothstep(0.0,0.3,heat));",
+    "  col=mix(col,yellow,smoothstep(0.25,0.6,heat));",
+    "  col=mix(col,white,smoothstep(0.6,0.95,heat));",
+    "  float bm=(1.0-smoothstep(0.0,0.22,yy))*(1.0-smoothstep(0.2,0.9,dist));",
+    "  col=mix(col,blue,bm*0.85);",
+    "  gl_FragColor=vec4(col*(0.9+0.5*heat),body*uInt);",
+    "}"
+  ].join("\n")
+});
+var flame=new THREE.Mesh(new THREE.PlaneGeometry(0.5,1,1,24).translate(0,0.5,0),flameMat);
+flame.position.set(tipX,tipY-0.03,0);
+flame.renderOrder=4;
+candle.add(flame);
+
+function sprite(tex,size,order){
+  var s=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false}));
+  s.scale.set(size,size,1);s.renderOrder=order;
   return s;
 }
-var fOuter=layer(texOuter,0.62,1.05,3);
-var fMid=layer(texMid,0.4,0.78,4);
-var fCore=layer(texCore,0.2,0.44,5);
-
-var blue=new THREE.Sprite(new THREE.SpriteMaterial({map:texBlue,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false}));
-blue.position.set(0,flameY+0.04,0);blue.scale.set(0.2,0.22,1);blue.renderOrder=2;
-candle.add(blue);
-
-var glow=new THREE.Sprite(new THREE.SpriteMaterial({map:texGlow,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false}));
-glow.position.set(0,flameY+0.4,0);glow.scale.set(6.5,6.5,1);glow.renderOrder=1;
-candle.add(glow);
-
-var ember=new THREE.Sprite(new THREE.SpriteMaterial({map:texEmber,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false,opacity:0}));
-ember.position.set(0,flameY+0.04,0);ember.scale.set(0.28,0.28,1);ember.renderOrder=6;
-candle.add(ember);
+var glow=sprite(texGlow,6,1);
+glow.position.set(tipX,tipY+0.4,0);candle.add(glow);
+var halo=sprite(texHalo,1.4,2);
+halo.position.set(tipX,tipY+0.36,0);candle.add(halo);
+var ember=sprite(texEmber,0.3,6);
+ember.material.opacity=0;
+ember.position.set(tipX,tipY,0);candle.add(ember);
 
 var flameLight=new THREE.PointLight(0xffa64d,1.6,15,2);
-flameLight.position.set(0,worldFlameY+0.35,0);
+flameLight.position.set(tipX,worldTipY+0.55,0);
 scene.add(flameLight);
-var fillLight=new THREE.PointLight(0xff9a40,0.7,9,2);
-fillLight.position.set(0.9,worldFlameY-0.2,1.7);
+var fillLight=new THREE.PointLight(0xff9a40,0.8,10,2);
+fillLight.position.set(1.1,worldTipY+0.1,2.0);
 scene.add(fillLight);
+
+/* ---------- drifting dust in the candlelight ---------- */
+var DN=38,dustPos=new Float32Array(DN*3),dustCol=new Float32Array(DN*3),dustSeed=[];
+for(var di=0;di<DN;di++){
+  dustPos[di*3]=(Math.random()-0.5)*5.5;
+  dustPos[di*3+1]=0.6+Math.random()*4.2;
+  dustPos[di*3+2]=(Math.random()-0.5)*4;
+  dustSeed.push(Math.random()*6.28);
+}
+var dustGeo=new THREE.BufferGeometry();
+dustGeo.setAttribute("position",new THREE.BufferAttribute(dustPos,3));
+dustGeo.setAttribute("color",new THREE.BufferAttribute(dustCol,3));
+var dust=new THREE.Points(dustGeo,new THREE.PointsMaterial({
+  size:0.09,map:texMote,vertexColors:true,transparent:true,blending:THREE.AdditiveBlending,
+  depthWrite:false,sizeAttenuation:true,fog:false
+}));
+dust.frustumCulled=false;
+scene.add(dust);
 
 /* ---------- smoke ---------- */
 var puffs=[];
 function spawnSmoke(){
   var m=new THREE.SpriteMaterial({map:texSmoke,transparent:true,opacity:0,depthWrite:false,fog:false,color:0x9a9794});
   var s=new THREE.Sprite(m);
-  s.position.set((Math.random()-0.5)*0.03,worldFlameY+0.06,(Math.random()-0.5)*0.03);
-  s.scale.set(0.12,0.12,1);
+  s.position.set(tipX+(Math.random()-0.5)*0.02,worldTipY+0.05,(Math.random()-0.5)*0.02);
+  s.scale.set(0.06,0.06,1);
   s.renderOrder=7;
   scene.add(s);
-  puffs.push({s:s,age:0,life:3+Math.random()*1.6,vx:(Math.random()-0.5)*0.05,vy:0.5+Math.random()*0.25,ph:Math.random()*6.28,r0:0.1+Math.random()*0.06});
+  puffs.push({s:s,age:0,life:3.6+Math.random()*2,vy:0.36+Math.random()*0.16,ph:Math.random()*6.28,r0:0.04+Math.random()*0.03});
 }
 function updateSmoke(dt){
   for(var i=puffs.length-1;i>=0;i--){
     var p=puffs[i];p.age+=dt;
     var k=p.age/p.life;
     if(k>=1){scene.remove(p.s);p.s.material.dispose();puffs.splice(i,1);continue}
-    p.s.position.y+=p.vy*dt*(1-k*0.5);
-    p.s.position.x+=(Math.sin(p.age*2.2+p.ph)*0.12+p.vx+0.12*k)*dt;
-    var sz=p.r0+k*0.95;
-    p.s.scale.set(sz,sz,1);
-    p.s.material.opacity=0.3*Math.min(1,p.age*4)*(1-k);
+    p.s.position.y+=p.vy*dt*(1-k*0.45);
+    p.s.position.x+=(Math.sin(p.age*2.1+p.ph)*0.09*(0.3+k)+0.08*k)*dt;
+    p.s.position.z+=Math.cos(p.age*1.7+p.ph)*0.05*dt;
+    var sz=p.r0+k*0.55;
+    p.s.scale.set(sz,sz*1.3,1);
+    p.s.material.opacity=0.2*Math.min(1,p.age*5)*(1-k);
   }
 }
 
@@ -288,7 +425,7 @@ function light(){
 }
 function extinguish(now){
   if(!isLit)return;
-  isLit=false;smokeUntil=now+3;emberT=1;hold=0;
+  isLit=false;smokeUntil=now+3.5;emberT=1;hold=0;
   lightBtn.disabled=false;
   say("Whoosh. The candle is out. Tap the candle or press Light candle to relight it.");
 }
@@ -359,10 +496,10 @@ function resize(){
   renderer.setSize(w,h,false);
   camera.aspect=w/h;
   var d=Math.max(7.6,4.4/(0.6887*camera.aspect));
-  camera.position.set(0,2.5,d);
-  camera.lookAt(0,1.55,0);
+  camera.position.set(0,2.2+d*0.22,d);
+  camera.lookAt(0,1.75,0);
   camera.updateProjectionMatrix();
-  scene.fog.near=d+4;scene.fog.far=d+20;
+  scene.fog.near=d+5;scene.fog.far=d+21;
 }
 if(window.ResizeObserver)new ResizeObserver(resize).observe(stage);
 window.addEventListener("resize",resize);
@@ -386,51 +523,69 @@ function frame(){
     if(hold>0.3)extinguish(t);
   }
 
-  if(isLit)litAmt=Math.min(1,litAmt+dt*2.5);
-  else litAmt=Math.max(0,litAmt-dt*7);
+  if(isLit)litAmt=Math.min(1,litAmt+dt*2.2);
+  else litAmt=Math.max(0,litAmt-dt*4.5);
 
-  var flick=1+0.06*Math.sin(t*23)+0.05*Math.sin(t*37+1.3)+0.03*Math.sin(t*61);
-  var sway=0.04*Math.sin(t*5.1)+0.025*Math.sin(t*8.7);
-  var lean=-(blowS*0.85)+sway+0.15*blowS*Math.sin(t*40);
+  var fl=flickerNoise(t);                       /* about 0.5 on average */
+  var flick=0.78+0.44*fl;                       /* about 1 on average */
+  var sway=0.05*Math.sin(t*5.1)+0.03*Math.sin(t*8.7);
+  var lean=blowS*0.42+sway;
 
-  var layers=[[fOuter,1.25],[fMid,1],[fCore,0.8]];
-  for(var i=0;i<layers.length;i++){
-    var s=layers[i][0],k=layers[i][1];
-    var u=s.userData;
-    s.visible=litAmt>0.01;
-    s.material.rotation=lean*k;
-    s.scale.set(
-      u.w*(1+0.3*blowS)*(0.92+0.08*flick)*litAmt,
-      u.h*flick*(1-0.45*blowS)*litAmt,
-      1
-    );
-  }
-  blue.visible=litAmt>0.01;
-  blue.material.opacity=litAmt;
-  glow.material.opacity=0.55*litAmt*(0.9+0.1*flick);
-  glow.scale.setScalar(6.5*(0.96+0.04*flick));
+  var u=flameMat.uniforms;
+  u.uTime.value=t;
+  u.uBlow.value=blowS;
+  u.uLean.value=lean;
+  u.uInt.value=litAmt;
+  flame.visible=litAmt>0.02;
+  var grow=0.35+0.65*litAmt;
+  flame.scale.set(
+    0.9*(1+0.25*blowS)*grow*(0.96+0.06*fl),
+    0.88*(0.9+0.2*fl)*(1-0.4*blowS)*grow,
+    1
+  );
 
-  flameLight.intensity=1.6*litAmt*flick+0.25*emberT;
-  fillLight.intensity=0.7*litAmt*flick;
-  waxMat.emissiveIntensity=litAmt;
-  topMat.emissiveIntensity=0.9*litAmt;
-  rimMat.emissiveIntensity=0.3*litAmt;
-  dripMat.emissiveIntensity=0.25*litAmt;
+  glow.material.opacity=0.42*litAmt*(0.88+0.24*fl);
+  halo.material.opacity=0.5*litAmt*(0.9+0.2*fl);
+  halo.scale.setScalar(1.4*(0.94+0.12*fl));
+
+  flameLight.intensity=1.35*litAmt*flick+0.25*emberT;
+  fillLight.intensity=0.8*litAmt*flick;
+  var em=litAmt*(0.85+0.3*fl);
+  waxMat.emissiveIntensity=em;
+  topMat.emissiveIntensity=0.3*em;
+  dripMat.emissiveIntensity=0.5*em;
+  puddle.material.emissiveIntensity=0.08*em;
+  plateMat.envMapIntensity=1.15*litAmt+0.04;
+  contact.material.opacity=0.8;
 
   if(!isLit){
     emberT=Math.max(0,emberT-dt*0.33);
     var pulse=0.75+0.25*Math.sin(t*9);
     ember.material.opacity=emberT*pulse;
-    wickMat.emissiveIntensity=emberT*pulse*1.2;
+    wickMat.emissiveIntensity=emberT*pulse*0.4;
+    tipMat.emissiveIntensity=emberT*pulse*1.3;
     if(t<smokeUntil){
-      smokeAcc+=dt*16*((smokeUntil-t)/3);
+      smokeAcc+=dt*26*((smokeUntil-t)/3.5);
       while(smokeAcc>=1){smokeAcc-=1;spawnSmoke()}
     }
   }else{
     ember.material.opacity=0;
-    wickMat.emissiveIntensity=0.5*litAmt;
+    wickMat.emissiveIntensity=0;
+    tipMat.emissiveIntensity=0.5*litAmt;
   }
   updateSmoke(dt);
+
+  for(var i=0;i<DN;i++){
+    var s=dustSeed[i];
+    dustPos[i*3]+=Math.sin(t*0.3+s)*dt*0.05;
+    dustPos[i*3+1]+=dt*(0.035+0.02*Math.sin(s+t*0.2));
+    if(dustPos[i*3+1]>5.2)dustPos[i*3+1]=0.5;
+    var dx=dustPos[i*3],dy=dustPos[i*3+1]-worldTipY-0.3,dz=dustPos[i*3+2];
+    var b=litAmt*0.9/(1+(dx*dx+dy*dy+dz*dz)*0.9)*(0.7+0.3*Math.sin(t*1.3+s*3));
+    dustCol[i*3]=1*b;dustCol[i*3+1]=0.72*b;dustCol[i*3+2]=0.42*b;
+  }
+  dustGeo.attributes.position.needsUpdate=true;
+  dustGeo.attributes.color.needsUpdate=true;
 
   renderer.render(scene,camera);
 }
