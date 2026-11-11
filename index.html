@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Candle Breath</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap">
+<style>
+/* Layout: full-height night scene on top, one control panel underneath. Palette: near-black room, candle amber. */
+:root{
+  --bg:#08070a;
+  --fg:#f4eadb;
+  --muted:#a89a86;
+  --accent:#ffb347;
+  --accent-ink:#2a1700;
+  --surface:#1d1812;
+  --line:#2e261d;
+  --font:"DM Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  color-scheme:dark;
+}
+html{box-sizing:border-box;height:100%}
+body{
+  margin:0;height:100%;box-sizing:border-box;
+  background:var(--bg);color:var(--fg);font:15px/1.45 var(--font);
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-block:0;
+  -webkit-tap-highlight-color:transparent;
+}
+#app{height:100%;display:flex;flex-direction:column}
+#stage{
+  flex:1;min-height:0;position:relative;
+  margin-left:calc(-1 * max(16px,env(safe-area-inset-left,0px)));
+  margin-right:calc(-1 * max(16px,env(safe-area-inset-right,0px)));
+}
+#stage canvas{display:block;width:100%;height:100%}
+#panel{display:flex;flex-direction:column;gap:12px;padding:14px 0 16px;border-top:1px solid var(--line)}
+#status{margin:0;min-height:2.9em;color:var(--fg)}
+.row{display:flex;flex-wrap:wrap;gap:10px}
+button{
+  font:inherit;font-weight:500;padding:11px 16px;border-radius:10px;
+  border:1px solid var(--line);background:var(--surface);color:var(--fg);
+  cursor:pointer;touch-action:manipulation;
+}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+button:disabled{opacity:.45;cursor:default}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#blowBtn{-webkit-user-select:none;user-select:none;touch-action:none;-webkit-touch-callout:none}
+#blowBtn.down{background:#2a2218;border-color:var(--accent)}
+.gauges{display:grid;grid-template-columns:auto 1fr;gap:12px 14px;align-items:center}
+.gauges label,.gauges .lbl{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+input[type=range]{width:100%;min-width:0;accent-color:var(--accent);margin:0}
+#meter{position:relative;height:10px;border-radius:5px;background:var(--surface);overflow:hidden}
+#meterFill{position:absolute;top:0;bottom:0;left:0;width:0;background:var(--accent);border-radius:5px}
+#meter .tick{position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--fg);opacity:.7}
+</style>
+
+<div id="app">
+  <div id="stage" aria-label="A lit candle on a brass dish"></div>
+  <section id="panel">
+    <p id="status" role="status" aria-live="polite">Turn on the microphone, then blow on the candle.</p>
+    <div class="row">
+      <button id="micBtn" class="primary" type="button">Turn on microphone</button>
+      <button id="lightBtn" type="button" disabled>Light candle</button>
+      <button id="blowBtn" type="button">Hold to blow</button>
+    </div>
+    <div class="gauges">
+      <label for="sens">Sensitivity</label>
+      <input id="sens" type="range" min="0.5" max="2.5" step="0.1" value="1.4">
+      <span class="lbl">Breath</span>
+      <div id="meter"><i id="meterFill"></i><b class="tick"></b></div>
+    </div>
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+var stage=document.getElementById("stage");
+var statusEl=document.getElementById("status");
+var micBtn=document.getElementById("micBtn");
+var lightBtn=document.getElementById("lightBtn");
+var blowBtn=document.getElementById("blowBtn");
+var sensEl=document.getElementById("sens");
+var fillEl=document.getElementById("meterFill");
+
+function say(t){statusEl.textContent=t}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+
+if(!window.THREE){say("The 3D library did not load. Check your connection and reload the page.");return}
+var THREE=window.THREE;
+
+var renderer;
+try{renderer=new THREE.WebGLRenderer({antialias:true,alpha:true})}
+catch(e){say("This browser cannot run WebGL, so the candle cannot be drawn.");return}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+renderer.setClearColor(0x000000,0);
+stage.appendChild(renderer.domElement);
+
+var scene=new THREE.Scene();
+scene.fog=new THREE.Fog(0x08070a,12,30);
+var camera=new THREE.PerspectiveCamera(38,1,0.1,80);
+
+/* ---------- textures drawn on canvas ---------- */
+function canvasTex(c){var t=new THREE.CanvasTexture(c);t.needsUpdate=true;return t}
+
+function flameTex(stops){
+  var c=document.createElement("canvas");c.width=128;c.height=256;
+  var g=c.getContext("2d");
+  g.shadowColor="#ffffff";g.shadowBlur=26;
+  g.fillStyle="#ffffff";
+  g.beginPath();
+  g.moveTo(64,236);
+  g.bezierCurveTo(28,236,24,172,46,132);
+  g.bezierCurveTo(60,106,62,60,64,20);
+  g.bezierCurveTo(66,60,68,106,82,132);
+  g.bezierCurveTo(104,172,100,236,64,236);
+  g.closePath();
+  g.fill();
+  g.shadowBlur=0;
+  g.globalCompositeOperation="source-in";
+  var gr=g.createRadialGradient(64,204,4,64,196,200);
+  for(var i=0;i<stops.length;i++)gr.addColorStop(stops[i][0],stops[i][1]);
+  g.fillStyle=gr;g.fillRect(0,0,128,256);
+  return canvasTex(c);
+}
+function roundTex(stops){
+  var c=document.createElement("canvas");c.width=c.height=128;
+  var g=c.getContext("2d");
+  var gr=g.createRadialGradient(64,64,0,64,64,64);
+  for(var i=0;i<stops.length;i++)gr.addColorStop(stops[i][0],stops[i][1]);
+  g.fillStyle=gr;g.fillRect(0,0,128,128);
+  return canvasTex(c);
+}
+function waxGlowTex(){
+  var c=document.createElement("canvas");c.width=4;c.height=256;
+  var g=c.getContext("2d");
+  var gr=g.createLinearGradient(0,0,0,256);
+  gr.addColorStop(0,"#ffffff");gr.addColorStop(0.12,"#d9b27a");gr.addColorStop(0.4,"#4a2f14");gr.addColorStop(0.7,"#000000");
+  g.fillStyle=gr;g.fillRect(0,0,4,256);
+  return canvasTex(c);
+}
+
+var texOuter=flameTex([[0,"rgba(255,150,40,0.6)"],[0.55,"rgba(255,100,10,0.4)"],[1,"rgba(255,60,0,0)"]]);
+var texMid=flameTex([[0,"rgba(255,236,160,1)"],[0.5,"rgba(255,190,60,0.9)"],[1,"rgba(255,130,20,0)"]]);
+var texCore=flameTex([[0,"rgba(255,255,240,1)"],[0.6,"rgba(255,240,170,0.8)"],[1,"rgba(255,220,120,0)"]]);
+var texGlow=roundTex([[0,"rgba(255,170,70,0.9)"],[0.35,"rgba(255,120,30,0.35)"],[1,"rgba(255,90,0,0)"]]);
+var texBlue=roundTex([[0,"rgba(140,180,255,0.9)"],[1,"rgba(70,110,255,0)"]]);
+var texSmoke=roundTex([[0,"rgba(255,255,255,0.55)"],[0.5,"rgba(255,255,255,0.22)"],[1,"rgba(255,255,255,0)"]]);
+var texEmber=roundTex([[0,"rgba(255,200,110,1)"],[0.4,"rgba(255,110,20,0.6)"],[1,"rgba(255,60,0,0)"]]);
+
+/* ---------- the room ---------- */
+scene.add(new THREE.AmbientLight(0x2a2f45,0.4));
+
+var floor=new THREE.Mesh(
+  new THREE.PlaneGeometry(90,90),
+  new THREE.MeshStandardMaterial({color:0x1d150e,roughness:0.85,metalness:0})
+);
+floor.rotation.x=-Math.PI/2;
+scene.add(floor);
+
+var candle=new THREE.Group();
+candle.position.y=0.1;
+scene.add(candle);
+
+var plate=new THREE.Mesh(
+  new THREE.CylinderGeometry(1.45,1.35,0.1,64),
+  new THREE.MeshStandardMaterial({color:0xb08a4a,roughness:0.4,metalness:0.35})
+);
+plate.position.y=0.05;
+scene.add(plate);
+var dish=new THREE.Mesh(
+  new THREE.CylinderGeometry(1.08,1.08,0.03,64),
+  new THREE.MeshStandardMaterial({color:0x6e5429,roughness:0.5,metalness:0.3})
+);
+dish.position.y=0.11;
+scene.add(dish);
+
+var H=2.2,R=0.45;
+var waxMat=new THREE.MeshStandardMaterial({
+  color:0xf3e6c9,roughness:0.6,metalness:0,
+  emissive:0xffa050,emissiveMap:waxGlowTex(),emissiveIntensity:1
+});
+var body=new THREE.Mesh(new THREE.CylinderGeometry(R,R,H,48,1,true),waxMat);
+body.position.y=H/2;
+candle.add(body);
+
+var topMat=new THREE.MeshStandardMaterial({color:0xfff1cf,roughness:0.5,emissive:0xffb060,emissiveIntensity:0.9});
+var top=new THREE.Mesh(new THREE.CircleGeometry(R*0.97,48),topMat);
+top.rotation.x=-Math.PI/2;top.position.y=H;
+candle.add(top);
+
+var rimMat=new THREE.MeshStandardMaterial({color:0xf3e6c9,roughness:0.55,emissive:0xffa050,emissiveIntensity:0.3});
+var rim=new THREE.Mesh(new THREE.TorusGeometry(R*0.98,0.035,8,48),rimMat);
+rim.rotation.x=Math.PI/2;rim.position.y=H;
+candle.add(rim);
+
+var dripMat=new THREE.MeshStandardMaterial({color:0xf6ead0,roughness:0.5,emissive:0xffa050,emissiveIntensity:0.25});
+[[1.35,0.7],[1.75,0.45],[2.15,0.95]].forEach(function(d){
+  var len=d[1],r=0.045;
+  var g=new THREE.Group();
+  var cyl=new THREE.Mesh(new THREE.CylinderGeometry(r,r*1.1,len,12),dripMat);
+  cyl.position.y=-len/2;
+  var tip=new THREE.Mesh(new THREE.SphereGeometry(r*1.3,12,10),dripMat);
+  tip.position.y=-len;
+  g.add(cyl);g.add(tip);
+  g.position.set(Math.cos(d[0])*(R+0.012),H,Math.sin(d[0])*(R+0.012));
+  candle.add(g);
+});
+
+var wickMat=new THREE.MeshStandardMaterial({color:0x17120d,roughness:0.9,emissive:0xff5a10,emissiveIntensity:0});
+var wick=new THREE.Mesh(new THREE.CylinderGeometry(0.022,0.03,0.26,10),wickMat);
+wick.position.y=H+0.13;
+candle.add(wick);
+
+var flameY=H+0.2;               /* local to candle */
+var worldFlameY=candle.position.y+flameY;
+
+/* ---------- flame layers ---------- */
+function layer(tex,w,h,order){
+  var m=new THREE.SpriteMaterial({map:tex,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false});
+  var s=new THREE.Sprite(m);
+  s.center.set(0.5,0.08);
+  s.position.set(0,flameY,0);
+  s.userData={w:w,h:h};
+  s.renderOrder=order;
+  candle.add(s);
+  return s;
+}
+var fOuter=layer(texOuter,0.62,1.05,3);
+var fMid=layer(texMid,0.4,0.78,4);
+var fCore=layer(texCore,0.2,0.44,5);
+
+var blue=new THREE.Sprite(new THREE.SpriteMaterial({map:texBlue,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false}));
+blue.position.set(0,flameY+0.04,0);blue.scale.set(0.2,0.22,1);blue.renderOrder=2;
+candle.add(blue);
+
+var glow=new THREE.Sprite(new THREE.SpriteMaterial({map:texGlow,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false}));
+glow.position.set(0,flameY+0.4,0);glow.scale.set(6.5,6.5,1);glow.renderOrder=1;
+candle.add(glow);
+
+var ember=new THREE.Sprite(new THREE.SpriteMaterial({map:texEmber,transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,fog:false,opacity:0}));
+ember.position.set(0,flameY+0.04,0);ember.scale.set(0.28,0.28,1);ember.renderOrder=6;
+candle.add(ember);
+
+var flameLight=new THREE.PointLight(0xffa64d,1.6,15,2);
+flameLight.position.set(0,worldFlameY+0.35,0);
+scene.add(flameLight);
+var fillLight=new THREE.PointLight(0xff9a40,0.7,9,2);
+fillLight.position.set(0.9,worldFlameY-0.2,1.7);
+scene.add(fillLight);
+
+/* ---------- smoke ---------- */
+var puffs=[];
+function spawnSmoke(){
+  var m=new THREE.SpriteMaterial({map:texSmoke,transparent:true,opacity:0,depthWrite:false,fog:false,color:0x9a9794});
+  var s=new THREE.Sprite(m);
+  s.position.set((Math.random()-0.5)*0.03,worldFlameY+0.06,(Math.random()-0.5)*0.03);
+  s.scale.set(0.12,0.12,1);
+  s.renderOrder=7;
+  scene.add(s);
+  puffs.push({s:s,age:0,life:3+Math.random()*1.6,vx:(Math.random()-0.5)*0.05,vy:0.5+Math.random()*0.25,ph:Math.random()*6.28,r0:0.1+Math.random()*0.06});
+}
+function updateSmoke(dt){
+  for(var i=puffs.length-1;i>=0;i--){
+    var p=puffs[i];p.age+=dt;
+    var k=p.age/p.life;
+    if(k>=1){scene.remove(p.s);p.s.material.dispose();puffs.splice(i,1);continue}
+    p.s.position.y+=p.vy*dt*(1-k*0.5);
+    p.s.position.x+=(Math.sin(p.age*2.2+p.ph)*0.12+p.vx+0.12*k)*dt;
+    var sz=p.r0+k*0.95;
+    p.s.scale.set(sz,sz,1);
+    p.s.material.opacity=0.3*Math.min(1,p.age*4)*(1-k);
+  }
+}
+
+/* ---------- state ---------- */
+var isLit=true,litAmt=1;
+var blowTarget=0,blowS=0,hold=0;
+var smokeUntil=0,smokeAcc=0,emberT=0;
+var holdBtn=false;
+
+function light(){
+  if(isLit)return;
+  isLit=true;emberT=0;
+  lightBtn.disabled=true;
+  say(micOn?"Lit again. Blow to put it out.":"Lit again. Hold the blow button, or turn on the microphone.");
+}
+function extinguish(now){
+  if(!isLit)return;
+  isLit=false;smokeUntil=now+3;emberT=1;hold=0;
+  lightBtn.disabled=false;
+  say("Whoosh. The candle is out. Tap the candle or press Light candle to relight it.");
+}
+
+/* ---------- microphone ---------- */
+var micOn=false,analyser=null,buf=null,ac=null,floorLvl=0.005,calib=0;
+
+function enableMic(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    say("Microphone access is not available on this page. Use Hold to blow, or open the page over https in your phone's browser.");
+    return;
+  }
+  micBtn.disabled=true;
+  navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+  .then(function(stream){
+    var AC=window.AudioContext||window.webkitAudioContext;
+    ac=new AC();
+    if(ac.resume)ac.resume();
+    var src=ac.createMediaStreamSource(stream);
+    analyser=ac.createAnalyser();
+    analyser.fftSize=1024;analyser.smoothingTimeConstant=0;
+    src.connect(analyser);
+    buf=new Uint8Array(analyser.fftSize);
+    micOn=true;calib=0.8;floorLvl=0.005;
+    micBtn.textContent="Microphone on";
+    say("Listening. Stay quiet for a second while it measures the room.");
+  })
+  .catch(function(){
+    micBtn.disabled=false;
+    say("The microphone was blocked or is not available here. Use Hold to blow, or open the page over https and allow the microphone.");
+  });
+}
+function readMic(dt){
+  if(!analyser)return 0;
+  analyser.getByteTimeDomainData(buf);
+  var s=0;
+  for(var i=0;i<buf.length;i++){var v=(buf[i]-128)/128;s+=v*v}
+  var rms=Math.sqrt(s/buf.length);
+  if(calib>0){
+    floorLvl=Math.max(floorLvl,rms);
+    calib-=dt;
+    if(calib<=0)say(isLit?"Ready. Blow across the microphone at the bottom of your phone.":"Ready. Relight the candle, then blow.");
+    return 0;
+  }
+  if(rms<floorLvl)floorLvl=floorLvl*0.97+rms*0.03;
+  var sens=parseFloat(sensEl.value)||1;
+  return clamp((rms-floorLvl-0.015)/(0.2/sens),0,1.3);
+}
+
+/* ---------- controls ---------- */
+micBtn.addEventListener("click",enableMic);
+lightBtn.addEventListener("click",light);
+stage.addEventListener("click",function(){if(!isLit)light()});
+function setHold(v){holdBtn=v;blowBtn.classList.toggle("down",v)}
+blowBtn.addEventListener("pointerdown",function(e){e.preventDefault();setHold(true)});
+["pointerup","pointercancel","pointerleave"].forEach(function(n){blowBtn.addEventListener(n,function(){setHold(false)})});
+blowBtn.addEventListener("contextmenu",function(e){e.preventDefault()});
+window.addEventListener("keydown",function(e){
+  if(e.code==="Space"&&!e.repeat&&e.target.tagName!=="BUTTON"&&e.target.tagName!=="INPUT"){e.preventDefault();setHold(true)}
+});
+window.addEventListener("keyup",function(e){if(e.code==="Space")setHold(false)});
+window.addEventListener("blur",function(){setHold(false)});
+
+/* ---------- sizing ---------- */
+function resize(){
+  var w=stage.clientWidth,h=stage.clientHeight;
+  if(!w||!h)return;
+  renderer.setSize(w,h,false);
+  camera.aspect=w/h;
+  var d=Math.max(7.6,4.4/(0.6887*camera.aspect));
+  camera.position.set(0,2.5,d);
+  camera.lookAt(0,1.55,0);
+  camera.updateProjectionMatrix();
+  scene.fog.near=d+4;scene.fog.far=d+20;
+}
+if(window.ResizeObserver)new ResizeObserver(resize).observe(stage);
+window.addEventListener("resize",resize);
+resize();
+
+/* ---------- loop ---------- */
+var clock=new THREE.Clock();
+function frame(){
+  requestAnimationFrame(frame);
+  var dt=Math.min(clock.getDelta(),0.05);
+  var t=clock.elapsedTime;
+
+  var mic=readMic(dt);
+  blowTarget=Math.max(mic,holdBtn?0.85:0);
+  var rate=blowTarget>blowS?18:6;
+  blowS+=(blowTarget-blowS)*Math.min(1,dt*rate);
+  fillEl.style.width=(clamp(blowS,0,1)*100).toFixed(1)+"%";
+
+  if(isLit){
+    if(blowS>0.5)hold+=dt;else hold=Math.max(0,hold-dt*2);
+    if(hold>0.3)extinguish(t);
+  }
+
+  if(isLit)litAmt=Math.min(1,litAmt+dt*2.5);
+  else litAmt=Math.max(0,litAmt-dt*7);
+
+  var flick=1+0.06*Math.sin(t*23)+0.05*Math.sin(t*37+1.3)+0.03*Math.sin(t*61);
+  var sway=0.04*Math.sin(t*5.1)+0.025*Math.sin(t*8.7);
+  var lean=-(blowS*0.85)+sway+0.15*blowS*Math.sin(t*40);
+
+  var layers=[[fOuter,1.25],[fMid,1],[fCore,0.8]];
+  for(var i=0;i<layers.length;i++){
+    var s=layers[i][0],k=layers[i][1];
+    var u=s.userData;
+    s.visible=litAmt>0.01;
+    s.material.rotation=lean*k;
+    s.scale.set(
+      u.w*(1+0.3*blowS)*(0.92+0.08*flick)*litAmt,
+      u.h*flick*(1-0.45*blowS)*litAmt,
+      1
+    );
+  }
+  blue.visible=litAmt>0.01;
+  blue.material.opacity=litAmt;
+  glow.material.opacity=0.55*litAmt*(0.9+0.1*flick);
+  glow.scale.setScalar(6.5*(0.96+0.04*flick));
+
+  flameLight.intensity=1.6*litAmt*flick+0.25*emberT;
+  fillLight.intensity=0.7*litAmt*flick;
+  waxMat.emissiveIntensity=litAmt;
+  topMat.emissiveIntensity=0.9*litAmt;
+  rimMat.emissiveIntensity=0.3*litAmt;
+  dripMat.emissiveIntensity=0.25*litAmt;
+
+  if(!isLit){
+    emberT=Math.max(0,emberT-dt*0.33);
+    var pulse=0.75+0.25*Math.sin(t*9);
+    ember.material.opacity=emberT*pulse;
+    wickMat.emissiveIntensity=emberT*pulse*1.2;
+    if(t<smokeUntil){
+      smokeAcc+=dt*16*((smokeUntil-t)/3);
+      while(smokeAcc>=1){smokeAcc-=1;spawnSmoke()}
+    }
+  }else{
+    ember.material.opacity=0;
+    wickMat.emissiveIntensity=0.5*litAmt;
+  }
+  updateSmoke(dt);
+
+  renderer.render(scene,camera);
+}
+frame();
+})();
+</script>
+
+</html>
